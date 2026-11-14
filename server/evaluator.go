@@ -72,7 +72,10 @@ func (s *Server) batchEvaluate(ctx context.Context, r *flipt.BatchEvaluationRequ
 	for _, flag := range r.GetRequests() {
 		f, err := s.evaluate(ctx, flag)
 		if err != nil {
-			return nil, err
+			if _, disabled := err.(flagDisabledError); !disabled {
+				return nil, err
+			}
+			f.Disabled = true
 		}
 		f.RequestId = ""
 		f.RequestDurationMillis = float64(time.Since(startTime)) / float64(time.Millisecond)
@@ -80,6 +83,18 @@ func (s *Server) batchEvaluate(ctx context.Context, r *flipt.BatchEvaluationRequ
 	}
 
 	return &res, nil
+}
+
+type flagDisabledError struct {
+	error
+}
+
+func (e flagDisabledError) Error() string {
+	return e.error.Error()
+}
+
+func (e flagDisabledError) Unwrap() error {
+	return e.error
 }
 
 func (s *Server) evaluate(ctx context.Context, r *flipt.EvaluationRequest) (*flipt.EvaluationResponse, error) {
@@ -100,7 +115,7 @@ func (s *Server) evaluate(ctx context.Context, r *flipt.EvaluationRequest) (*fli
 	}
 
 	if !flag.Enabled {
-		return resp, errors.ErrInvalidf("flag %q is disabled", r.FlagKey)
+		return resp, flagDisabledError{error: errors.ErrInvalidf("flag %q is disabled", r.FlagKey)}
 	}
 
 	rules, err := s.store.GetEvaluationRules(ctx, r.FlagKey)
