@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 
@@ -25,7 +26,7 @@ var decodeHooks = mapstructure.ComposeDecodeHookFunc(
 // Config contains all of Flipts configuration needs.
 //
 // The root of this structure contains a collection of sub-configuration categories,
-// along with a set of warnings derived once the configuration has been loaded.
+// which are populated when the configuration is loaded.
 //
 // Each sub-configuration (e.g. LogConfig) optionally implements either or both of
 // the defaulter or validator interfaces.
@@ -45,10 +46,9 @@ type Config struct {
 	Database       DatabaseConfig       `json:"db,omitempty" mapstructure:"db"`
 	Meta           MetaConfig           `json:"meta,omitempty" mapstructure:"meta"`
 	Authentication AuthenticationConfig `json:"authentication,omitempty" mapstructure:"authentication"`
-	Warnings       []string             `json:"warnings,omitempty"`
 }
 
-func Load(path string) (*Config, error) {
+func Load(path string) (*Config, []string, error) {
 	v := viper.New()
 	v.SetEnvPrefix("FLIPT")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -57,26 +57,35 @@ func Load(path string) (*Config, error) {
 	v.SetConfigFile(path)
 
 	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("loading configuration: %w", err)
+		return nil, nil, fmt.Errorf("loading configuration: %w", err)
+	}
+
+	keys := make(map[string]bool)
+	for _, key := range v.AllKeys() {
+		keys[key] = true
+	}
+	present := func(key string) bool {
+		env := "FLIPT_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+		return keys[key] || os.Getenv(env) != ""
 	}
 
 	var (
-		cfg        = &Config{}
-		validators = cfg.prepare(v)
+		cfg                  = &Config{}
+		validators, warnings = cfg.prepare(v, present)
 	)
 
 	if err := v.Unmarshal(cfg, viper.DecodeHook(decodeHooks)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// run any validation steps
 	for _, validator := range validators {
 		if err := validator.validate(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	return cfg, nil
+	return cfg, warnings, nil
 }
 
 type defaulter interface {
@@ -88,10 +97,10 @@ type validator interface {
 }
 
 type deprecator interface {
-	deprecations(v *viper.Viper) []deprecation
+	deprecations(present func(string) bool) []deprecation
 }
 
-func (c *Config) prepare(v *viper.Viper) (validators []validator) {
+func (c *Config) prepare(v *viper.Viper, present func(string) bool) (validators []validator, warnings []string) {
 	val := reflect.ValueOf(c).Elem()
 	for i := 0; i < val.NumField(); i++ {
 		// search for all expected env vars since Viper cannot
@@ -118,9 +127,9 @@ func (c *Config) prepare(v *viper.Viper) (validators []validator) {
 		// for-each deprecator implementing field we collect
 		// the messages as warnings.
 		if deprecator, ok := field.(deprecator); ok {
-			for _, d := range deprecator.deprecations(v) {
+			for _, d := range deprecator.deprecations(present) {
 				if msg := d.String(); msg != "" {
-					c.Warnings = append(c.Warnings, msg)
+					warnings = append(warnings, msg)
 				}
 			}
 		}

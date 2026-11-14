@@ -56,10 +56,10 @@ func (c *DatabaseConfig) setDefaults(v *viper.Viper) {
 	}
 }
 
-func (c *DatabaseConfig) deprecations(v *viper.Viper) []deprecation {
+func (c *DatabaseConfig) deprecations(present func(string) bool) []deprecation {
 	var deprecations []deprecation
 
-	if v.IsSet("db.migrations.path") || v.IsSet("db.migrations_path") {
+	if present("db.migrations.path") || present("db.migrations_path") {
 		deprecations = append(deprecations, deprecation{
 			option:            "db.migrations.path",
 			additionalMessage: deprecatedMsgDatabaseMigrations,
