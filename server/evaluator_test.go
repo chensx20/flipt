@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	stderrors "errors"
 	"testing"
 
 	"github.com/gofrs/uuid"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -56,6 +59,73 @@ func TestBatchEvaluate(t *testing.T) {
 	assert.NotNil(t, resp.Responses)
 	assert.Equal(t, 1, len(resp.Responses))
 	assert.False(t, resp.Responses[0].Match)
+}
+
+func TestBatchEvaluateDisabledFlags(t *testing.T) {
+	store := &storeMock{}
+	s := &Server{logger: logger, store: store}
+	store.On("GetFlag", mock.Anything, "off").Return(&flipt.Flag{Key: "off"}, nil).Times(3)
+	store.On("GetFlag", mock.Anything, "on").Return(&flipt.Flag{Key: "on", Enabled: true}, nil).Times(2)
+	store.On("GetEvaluationRules", mock.Anything, "on").Return([]*storage.EvaluationRule{}, nil).Times(2)
+
+	requests := []*flipt.EvaluationRequest{
+		{FlagKey: "off", EntityId: "1", Context: map[string]string{"key": "first"}},
+		{FlagKey: "on", EntityId: "2", Context: map[string]string{"key": "second"}},
+		{FlagKey: "off", EntityId: "3", Context: map[string]string{"key": "third"}},
+		{FlagKey: "on", EntityId: "4", Context: map[string]string{"key": "fourth"}},
+		{FlagKey: "off", EntityId: "5", Context: map[string]string{"key": "fifth"}},
+	}
+	resp, err := s.BatchEvaluate(context.Background(), &flipt.BatchEvaluationRequest{Requests: requests})
+	require.NoError(t, err)
+	require.Len(t, resp.Responses, len(requests))
+	assert.NotEmpty(t, resp.RequestId)
+	assert.True(t, resp.RequestDurationMillis > 0)
+	for i, entry := range resp.Responses {
+		assert.Equal(t, requests[i].FlagKey, entry.FlagKey)
+		assert.Equal(t, requests[i].EntityId, entry.EntityId)
+		assert.Equal(t, requests[i].Context, entry.RequestContext)
+		assert.Equal(t, requests[i].FlagKey == "off", entry.Disabled)
+		assert.Empty(t, entry.RequestId)
+		assert.NotNil(t, entry.Timestamp)
+		assert.True(t, entry.RequestDurationMillis > 0)
+		assert.LessOrEqual(t, entry.RequestDurationMillis, resp.RequestDurationMillis)
+		if i > 0 {
+			assert.GreaterOrEqual(t, entry.RequestDurationMillis, resp.Responses[i-1].RequestDurationMillis)
+		}
+	}
+	store.AssertExpectations(t)
+}
+
+func TestBatchEvaluateOtherErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		rules bool
+	}{
+		{name: "missing flag", err: errors.ErrNotFound("flag missing")},
+		{name: "storage failure", err: stderrors.New("storage failure")},
+		{name: "invalid rules", err: errors.ErrInvalid("invalid rule"), rules: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &storeMock{}
+			s := &Server{logger: logger, store: store}
+			store.On("GetFlag", mock.Anything, "off").Return(disabledFlag, nil).Once()
+			if tt.rules {
+				store.On("GetFlag", mock.Anything, "bad").Return(enabledFlag, nil).Once()
+				store.On("GetEvaluationRules", mock.Anything, "bad").Return([]*storage.EvaluationRule{}, tt.err).Once()
+			} else {
+				store.On("GetFlag", mock.Anything, "bad").Return(&flipt.Flag{}, tt.err).Once()
+			}
+			resp, err := s.BatchEvaluate(context.Background(), &flipt.BatchEvaluationRequest{Requests: []*flipt.EvaluationRequest{
+				{FlagKey: "off"}, {FlagKey: "bad"}, {FlagKey: "later"},
+			}})
+			assert.Nil(t, resp)
+			assert.Equal(t, tt.err, err)
+			store.AssertNotCalled(t, "GetFlag", mock.Anything, "later")
+			store.AssertExpectations(t)
+		})
+	}
 }
 
 func TestEvaluate_FlagNotFound(t *testing.T) {
@@ -104,6 +174,11 @@ func TestEvaluate_FlagDisabled(t *testing.T) {
 	require.Error(t, err)
 	assert.EqualError(t, err, "flag \"foo\" is disabled")
 	assert.False(t, resp.Match)
+	assert.False(t, resp.Disabled)
+	_, mappedErr := s.ErrorUnaryInterceptor(context.Background(), nil, nil, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return resp, err
+	})
+	assert.Equal(t, codes.InvalidArgument, status.Code(mappedErr))
 }
 
 func TestEvaluate_FlagNoRules(t *testing.T) {
