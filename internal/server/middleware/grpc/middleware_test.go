@@ -38,6 +38,20 @@ func (v *validatable) Validate() error {
 	return v.err
 }
 
+func TestForwardOFREPNamespace(t *testing.T) {
+	t.Run("forwards header", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/ofrep/v1/evaluate/flags", nil)
+		req.Header.Set("X-Flipt-Namespace", "payments")
+		md := ForwardOFREPNamespace(context.Background(), req)
+		assert.Equal(t, []string{"payments"}, md.Get("x-flipt-namespace"))
+	})
+
+	t.Run("omits absent header", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/ofrep/v1/evaluate/flags", nil)
+		assert.Nil(t, ForwardOFREPNamespace(context.Background(), req))
+	})
+}
+
 func TestValidationUnaryInterceptor(t *testing.T) {
 	tests := []struct {
 		name       string

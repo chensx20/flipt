@@ -6,11 +6,15 @@ import (
 
 	"github.com/google/uuid"
 	flipterrors "go.flipt.io/flipt/errors"
+	"go.flipt.io/flipt/internal/storage"
 	"go.uber.org/zap"
 
+	"go.flipt.io/flipt/rpc/flipt"
 	rpcevaluation "go.flipt.io/flipt/rpc/flipt/evaluation"
 	"go.flipt.io/flipt/rpc/flipt/ofrep"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -45,12 +49,11 @@ func (s *Server) EvaluateFlag(ctx context.Context, r *ofrep.EvaluateFlagRequest)
 func (s *Server) EvaluateBulk(ctx context.Context, r *ofrep.EvaluateBulkRequest) (*ofrep.BulkEvaluationResponse, error) {
 	s.logger.Debug("ofrep bulk", zap.Stringer("request", r))
 	entityId := getTargetingKey(r.Context)
-	flagKeys, ok := r.Context["flags"]
-	if !ok {
-		return nil, newFlagsMissingError()
-	}
 	namespaceKey := getNamespace(ctx)
-	keys := strings.Split(flagKeys, ",")
+	keys, err := s.bulkFlagKeys(ctx, namespaceKey, r.Context)
+	if err != nil {
+		return nil, err
+	}
 	flags := make([]*ofrep.EvaluatedFlag, 0, len(keys))
 	for _, key := range keys {
 		key = strings.TrimSpace(key)
@@ -75,6 +78,27 @@ func (s *Server) EvaluateBulk(ctx context.Context, r *ofrep.EvaluateBulkRequest)
 	}
 	s.logger.Debug("ofrep bulk", zap.Stringer("response", resp))
 	return resp, nil
+}
+
+func (s *Server) bulkFlagKeys(ctx context.Context, namespaceKey string, requestContext map[string]string) ([]string, error) {
+	flagKeys, ok := requestContext["flags"]
+	if ok {
+		return strings.Split(flagKeys, ","), nil
+	}
+
+	result, err := s.store.ListFlags(ctx, storage.ListWithOptions(storage.NewNamespace(namespaceKey)))
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to fetch list of flags")
+	}
+
+	keys := make([]string, 0, len(result.Results))
+	for _, flag := range result.Results {
+		if flag.Type == flipt.FlagType_BOOLEAN_FLAG_TYPE ||
+			(flag.Type == flipt.FlagType_VARIANT_FLAG_TYPE && flag.Enabled) {
+			keys = append(keys, flag.Key)
+		}
+	}
+	return keys, nil
 }
 
 func transformOutput(output EvaluationBridgeOutput) (*ofrep.EvaluatedFlag, error) {
