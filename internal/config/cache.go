@@ -49,10 +49,10 @@ func (c *CacheConfig) setDefaults(v *viper.Viper) {
 	}
 }
 
-func (c *CacheConfig) deprecations(v *viper.Viper) []deprecation {
+func (c *CacheConfig) deprecations(present func(string) bool) []deprecation {
 	var deprecations []deprecation
 
-	if v.GetBool("cache.memory.enabled") {
+	if present("cache.memory.enabled") {
 		deprecations = append(deprecations, deprecation{
 
 			option:            "cache.memory.enabled",
@@ -60,7 +60,7 @@ func (c *CacheConfig) deprecations(v *viper.Viper) []deprecation {
 		})
 	}
 
-	if v.IsSet("cache.memory.expiration") {
+	if present("cache.memory.expiration") {
 		deprecations = append(deprecations, deprecation{
 			option:            "cache.memory.expiration",
 			additionalMessage: deprecatedMsgMemoryExpiration,

@@ -227,6 +227,7 @@ func TestLoad(t *testing.T) {
 		path     string
 		wantErr  error
 		expected func() *Config
+		warnings []string
 	}{
 		{
 			name:     "defaults",
@@ -236,38 +237,40 @@ func TestLoad(t *testing.T) {
 		{
 			name:     "deprecated - cache memory items defaults",
 			path:     "./testdata/deprecated/cache_memory_items.yml",
+			warnings: []string{`"cache.memory.enabled" is deprecated and will be removed in a future version. Please use 'cache.backend' and 'cache.enabled' instead.`},
 			expected: defaultConfig,
 		},
 		{
 			name: "deprecated - cache memory enabled",
+			warnings: []string{
+				"\"cache.memory.enabled\" is deprecated and will be removed in a future version. Please use 'cache.backend' and 'cache.enabled' instead.",
+				"\"cache.memory.expiration\" is deprecated and will be removed in a future version. Please use 'cache.ttl' instead.",
+			},
 			path: "./testdata/deprecated/cache_memory_enabled.yml",
 			expected: func() *Config {
 				cfg := defaultConfig()
 				cfg.Cache.Enabled = true
 				cfg.Cache.Backend = CacheMemory
 				cfg.Cache.TTL = -time.Second
-				cfg.Warnings = []string{
-					"\"cache.memory.enabled\" is deprecated and will be removed in a future version. Please use 'cache.backend' and 'cache.enabled' instead.",
-					"\"cache.memory.expiration\" is deprecated and will be removed in a future version. Please use 'cache.ttl' instead.",
-				}
+
 				return cfg
 			},
 		},
 		{
-			name: "deprecated - database migrations path",
-			path: "./testdata/deprecated/database_migrations_path.yml",
+			name:     "deprecated - database migrations path",
+			path:     "./testdata/deprecated/database_migrations_path.yml",
+			warnings: []string{`"db.migrations.path" is deprecated and will be removed in a future version. Migrations are now embedded within Flipt and are no longer required on disk.`},
 			expected: func() *Config {
 				cfg := defaultConfig()
-				cfg.Warnings = []string{"\"db.migrations.path\" is deprecated and will be removed in a future version. Migrations are now embedded within Flipt and are no longer required on disk."}
 				return cfg
 			},
 		},
 		{
-			name: "deprecated - database migrations path legacy",
-			path: "./testdata/deprecated/database_migrations_path_legacy.yml",
+			name:     "deprecated - database migrations path legacy",
+			path:     "./testdata/deprecated/database_migrations_path_legacy.yml",
+			warnings: []string{`"db.migrations.path" is deprecated and will be removed in a future version. Migrations are now embedded within Flipt and are no longer required on disk.`},
 			expected: func() *Config {
 				cfg := defaultConfig()
-				cfg.Warnings = []string{"\"db.migrations.path\" is deprecated and will be removed in a future version. Migrations are now embedded within Flipt and are no longer required on disk."}
 				return cfg
 			},
 		},
@@ -372,8 +375,9 @@ func TestLoad(t *testing.T) {
 			wantErr: errPositiveNonZeroDuration,
 		},
 		{
-			name: "advanced",
-			path: "./testdata/advanced.yml",
+			name:     "advanced",
+			warnings: []string{`"ui.enabled" is deprecated and will be removed in a future version.`},
+			path:     "./testdata/advanced.yml",
 			expected: func() *Config {
 				cfg := defaultConfig()
 				cfg.Log = LogConfig{
@@ -439,6 +443,7 @@ func TestLoad(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		var (
 			path     = tt.path
 			wantErr  = tt.wantErr
@@ -450,7 +455,7 @@ func TestLoad(t *testing.T) {
 		}
 
 		t.Run(tt.name+" (YAML)", func(t *testing.T) {
-			cfg, err := Load(path)
+			cfg, warnings, err := Load(path)
 
 			if wantErr != nil {
 				t.Log(err)
@@ -462,6 +467,7 @@ func TestLoad(t *testing.T) {
 
 			assert.NotNil(t, cfg)
 			assert.Equal(t, expected, cfg)
+			assert.Equal(t, tt.warnings, warnings)
 		})
 
 		t.Run(tt.name+" (ENV)", func(t *testing.T) {
@@ -483,7 +489,7 @@ func TestLoad(t *testing.T) {
 			}
 
 			// load default (empty) config
-			cfg, err := Load("./testdata/default.yml")
+			cfg, warnings, err := Load("./testdata/default.yml")
 
 			if wantErr != nil {
 				t.Log(err)
@@ -495,6 +501,7 @@ func TestLoad(t *testing.T) {
 
 			assert.NotNil(t, cfg)
 			assert.Equal(t, expected, cfg)
+			assert.Equal(t, tt.warnings, warnings)
 		})
 	}
 }
@@ -547,4 +554,51 @@ func getEnvVars(prefix string, v map[any]any) (vals [][2]string) {
 	}
 
 	return
+}
+
+func TestExplicitDeprecations(t *testing.T) {
+	const uiWarning = `"ui.enabled" is deprecated and will be removed in a future version.`
+	const cacheWarning = `"cache.memory.enabled" is deprecated and will be removed in a future version. Please use 'cache.backend' and 'cache.enabled' instead.`
+	const expirationWarning = `"cache.memory.expiration" is deprecated and will be removed in a future version. Please use 'cache.ttl' instead.`
+	const dbWarning = `"db.migrations.path" is deprecated and will be removed in a future version. Migrations are now embedded within Flipt and are no longer required on disk.`
+	tests := []struct {
+		name, content, env, value string
+		enabled                   bool
+		warnings                  []string
+	}{
+		{name: "omitted", content: "{}", enabled: true},
+		{name: "commented", content: "# ui:\n#   enabled: false\n{}", enabled: true},
+		{name: "true", content: "ui:\n  enabled: true", enabled: true, warnings: []string{uiWarning}},
+		{name: "false", content: "ui:\n  enabled: false", warnings: []string{uiWarning}},
+		{name: "environment", content: "{}", env: "FLIPT_UI_ENABLED", value: "false", warnings: []string{uiWarning}},
+		{name: "empty environment", content: "{}", env: "FLIPT_UI_ENABLED", enabled: true},
+		{name: "duplicate", content: "ui:\n  enabled: true", env: "FLIPT_UI_ENABLED", value: "false", warnings: []string{uiWarning}},
+		{name: "cache enabled without expiration", content: "cache:\n  memory:\n    enabled: true", enabled: true, warnings: []string{cacheWarning}},
+		{name: "cache expiration environment", content: "{}", env: "FLIPT_CACHE_MEMORY_EXPIRATION", value: "5m", enabled: true, warnings: []string{expirationWarning}},
+		{name: "database environment", content: "{}", env: "FLIPT_DB_MIGRATIONS_PATH", value: "path", enabled: true, warnings: []string{dbWarning}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env != "" {
+				t.Setenv(tt.env, tt.value)
+			}
+			path := t.TempDir() + "/config.yml"
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0600))
+			cfg, warnings, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.enabled, cfg.UI.Enabled)
+			assert.Equal(t, tt.warnings, warnings)
+			w := httptest.NewRecorder()
+			cfg.ServeHTTP(w, httptest.NewRequest("GET", "/meta/config", nil))
+			assert.NotContains(t, w.Body.String(), "warnings")
+		})
+	}
+}
+
+func TestLoadErrorReturnsNoWarnings(t *testing.T) {
+	cfg, warnings, err := Load("missing.yml")
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Nil(t, warnings)
 }

@@ -16,3 +16,10 @@ func (c *UIConfig) setDefaults(v *viper.Viper) {
 		"enabled": true,
 	})
 }
+
+func (c *UIConfig) deprecations(present func(string) bool) []deprecation {
+	if present("ui.enabled") {
+		return []deprecation{{option: "ui.enabled"}}
+	}
+	return nil
+}
