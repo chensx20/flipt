@@ -2,20 +2,75 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	fliptErrors "go.flipt.io/flipt/errors"
 	"go.flipt.io/flipt/internal/containers"
 	"go.flipt.io/flipt/internal/storage/auth"
 	"go.flipt.io/flipt/internal/storage/auth/memory"
 	authrpc "go.flipt.io/flipt/rpc/flipt/auth"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type errorAuthenticator struct {
+	err error
+}
+
+func (a errorAuthenticator) GetAuthenticationByClientToken(context.Context, string) (*authrpc.Authentication, error) {
+	return nil, a.err
+}
+
+func TestUnaryInterceptor_Cancellation(t *testing.T) {
+	md := metadata.New(map[string]string{"authorization": "Bearer token"})
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want codes.Code
+	}{
+		{name: "canceled context error", ctx: canceledAuthContext(), err: context.Canceled, want: codes.Canceled},
+		{name: "wrapped deadline error", ctx: expiredAuthContext(), err: fmt.Errorf("lookup: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+		{name: "postgres cancellation", ctx: canceledAuthContext(), err: fmt.Errorf("lookup: %w", &pq.Error{Code: pq.ErrorCode("57014")}), want: codes.Canceled},
+		{name: "wrapped sql cancellation", ctx: expiredAuthContext(), err: fmt.Errorf("lookup: %w", fliptErrors.ErrCanceled("query canceled")), want: codes.DeadlineExceeded},
+		{name: "live sql cancellation", ctx: context.Background(), err: storageSQLCancellationErrorForAuth(), want: codes.Unauthenticated},
+		{name: "invalid credentials", ctx: context.Background(), err: fmt.Errorf("invalid credentials"), want: codes.Unauthenticated},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := metadata.NewIncomingContext(test.ctx, md)
+			_, err := UnaryInterceptor(zaptest.NewLogger(t), errorAuthenticator{err: test.err})(
+				ctx, nil, &grpc.UnaryServerInfo{}, func(context.Context, interface{}) (interface{}, error) {
+					return nil, nil
+				})
+			require.Equal(t, test.want, status.Code(err))
+		})
+	}
+}
+
+func canceledAuthContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func expiredAuthContext() context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	return ctx
+}
+
+func storageSQLCancellationErrorForAuth() error {
+	return fliptErrors.ErrCanceled("query canceled")
+}
 
 // fakeserver is used to test skipping auth
 var fakeserver struct{}

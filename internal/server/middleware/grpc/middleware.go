@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"go.flipt.io/flipt/internal/server/auth"
 	"go.flipt.io/flipt/internal/server/cache"
 	"go.flipt.io/flipt/internal/server/metrics"
+	storageSQL "go.flipt.io/flipt/internal/storage/sql"
 	flipt "go.flipt.io/flipt/rpc/flipt"
 	fauth "go.flipt.io/flipt/rpc/flipt/auth"
 	"go.opentelemetry.io/otel/trace"
@@ -49,13 +51,19 @@ func ErrorUnaryInterceptor(ctx context.Context, req interface{}, _ *grpc.UnarySe
 		return
 	}
 
-	// given already a *status.Error then forward unchanged
-	if _, ok := status.FromError(err); ok {
-		return
-	}
-
 	code := codes.Internal
 	switch {
+	case errors.Is(err, context.Canceled):
+		code = codes.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		code = codes.DeadlineExceeded
+	case storageSQL.IsCancellationError(err):
+		switch ctx.Err() {
+		case context.Canceled:
+			code = codes.Canceled
+		case context.DeadlineExceeded:
+			code = codes.DeadlineExceeded
+		}
 	case errs.AsMatch[errs.ErrNotFound](err):
 		code = codes.NotFound
 	case errs.AsMatch[errs.ErrInvalid](err),

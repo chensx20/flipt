@@ -16,6 +16,25 @@ func errPtr[E error](e E) *E {
 	return &e
 }
 
+func TestIsCancellationError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "adapted error", err: errCanceled, want: true},
+		{name: "wrapped adapted error", err: fmt.Errorf("lookup: %w", errCanceled), want: true},
+		{name: "postgres error", err: &pq.Error{Code: pq.ErrorCode("57014")}, want: true},
+		{name: "wrapped postgres error", err: fmt.Errorf("query: %w", &pq.Error{Code: pq.ErrorCode("57014")}), want: true},
+		{name: "different postgres error", err: &pq.Error{Code: pq.ErrorCode("23505")}, want: false},
+		{name: "message only", err: fmt.Errorf("query canceled"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, IsCancellationError(test.err))
+		})
+	}
+}
+
 func Test_AdaptError(t *testing.T) {
 	for _, test := range []struct {
 		driver   Driver

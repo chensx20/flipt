@@ -18,6 +18,16 @@ var (
 	errCanceled           = flipterrors.ErrCanceled("query canceled")
 )
 
+// IsCancellationError reports whether err represents a canceled SQL query.
+func IsCancellationError(err error) bool {
+	if flipterrors.AsMatch[flipterrors.ErrCanceled](err) {
+		return true
+	}
+
+	var perr *pq.Error
+	return errors.As(err, &perr) && perr.Code == pq.ErrorCode("57014")
+}
+
 // AdaptError converts specific known-driver errors into wrapped storage errors.
 func (d Driver) AdaptError(err error) error {
 	if err == nil {
