@@ -2,6 +2,7 @@ package ofrep
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	flipterrors "go.flipt.io/flipt/errors"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/grpc/metadata"
 
@@ -17,11 +19,55 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.flipt.io/flipt/internal/config"
+	"go.flipt.io/flipt/internal/storage"
+	"go.flipt.io/flipt/rpc/flipt"
 	rpcevaluation "go.flipt.io/flipt/rpc/flipt/evaluation"
 	"go.flipt.io/flipt/rpc/flipt/ofrep"
 	"go.uber.org/zap/zaptest"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+type listFlagsStore struct {
+	result storage.ResultSet[*flipt.Flag]
+	err    error
+	req    *storage.ListRequest[storage.NamespaceRequest]
+}
+
+func (s *listFlagsStore) ListFlags(_ context.Context, req *storage.ListRequest[storage.NamespaceRequest]) (storage.ResultSet[*flipt.Flag], error) {
+	s.req = req
+	return s.result, s.err
+}
+
+func TestEvaluateBulkDiscoversFlagsWhenContextFlagsAreAbsent(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-flipt-namespace", "payments"))
+	store := &listFlagsStore{result: storage.ResultSet[*flipt.Flag]{Results: []*flipt.Flag{
+		{Key: "boolean", Type: flipt.FlagType_BOOLEAN_FLAG_TYPE, Enabled: false},
+		{Key: "enabled-variant", Type: flipt.FlagType_VARIANT_FLAG_TYPE, Enabled: true},
+		{Key: "disabled-variant", Type: flipt.FlagType_VARIANT_FLAG_TYPE, Enabled: false},
+		{Key: "unsupported", Type: flipt.FlagType(99), Enabled: true},
+	}}}
+	bridge := NewMockBridge(t)
+	for _, key := range []string{"boolean", "enabled-variant"} {
+		bridge.On("OFREPFlagEvaluation", ctx, EvaluationBridgeInput{FlagKey: key, NamespaceKey: "payments", EntityId: "targeting", Context: map[string]string{"targetingKey": "targeting"}}).
+			Return(EvaluationBridgeOutput{FlagKey: key, Value: false, Metadata: map[string]any{}}, nil)
+	}
+	s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge, store)
+	resp, err := s.EvaluateBulk(ctx, &ofrep.EvaluateBulkRequest{Context: map[string]string{"targetingKey": "targeting"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Flags, 2)
+	assert.Equal(t, []string{"boolean", "enabled-variant"}, []string{resp.Flags[0].Key, resp.Flags[1].Key})
+	require.NotNil(t, store.req)
+	assert.Equal(t, "payments", store.req.Predicate.Namespace())
+	assert.Zero(t, store.req.QueryParams.Limit)
+}
+
+func TestEvaluateBulkDiscoveryFailure(t *testing.T) {
+	store := &listFlagsStore{err: errors.New("store unavailable")}
+	s := New(zaptest.NewLogger(t), config.CacheConfig{}, NewMockBridge(t), store)
+	_, err := s.EvaluateBulk(context.Background(), &ofrep.EvaluateBulkRequest{Context: map[string]string{"targetingKey": "targeting"}})
+	require.EqualError(t, err, "rpc error: code = Internal desc = failed to fetch list of flags")
+	assert.Equal(t, codes.Internal, status.Code(err))
+}
 
 func TestEvaluateFlag_Success(t *testing.T) {
 	t.Run("should use the default namespace when no one was provided", func(t *testing.T) {
@@ -35,7 +81,7 @@ func TestEvaluateFlag_Success(t *testing.T) {
 			Metadata: &structpb.Struct{Fields: make(map[string]*structpb.Value)},
 		}
 		bridge := NewMockBridge(t)
-		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge)
+		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge, nil)
 
 		bridge.On("OFREPFlagEvaluation", ctx, EvaluationBridgeInput{
 			FlagKey:      flagKey,
@@ -77,7 +123,7 @@ func TestEvaluateFlag_Success(t *testing.T) {
 			Metadata: &structpb.Struct{Fields: make(map[string]*structpb.Value)},
 		}
 		bridge := NewMockBridge(t)
-		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge)
+		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge, nil)
 
 		bridge.On("OFREPFlagEvaluation", ctx, EvaluationBridgeInput{
 			FlagKey:      flagKey,
@@ -145,7 +191,7 @@ func TestEvaluateFlag_Failure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.TODO()
 			bridge := NewMockBridge(t)
-			s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge)
+			s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge, nil)
 			if tc.req.Key != "" {
 				bridge.On("OFREPFlagEvaluation", ctx, mock.Anything).Return(EvaluationBridgeOutput{}, tc.err)
 			}
@@ -171,7 +217,7 @@ func TestEvaluateBulkSuccess(t *testing.T) {
 			},
 		}}
 		bridge := NewMockBridge(t)
-		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge)
+		s := New(zaptest.NewLogger(t), config.CacheConfig{}, bridge, nil)
 
 		bridge.On("OFREPFlagEvaluation", ctx, EvaluationBridgeInput{
 			FlagKey:      flagKey,

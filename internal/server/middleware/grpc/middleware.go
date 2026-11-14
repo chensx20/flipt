@@ -376,3 +376,11 @@ func ForwardFliptAcceptServerVersion(ctx context.Context, req *http.Request) met
 	}
 	return md
 }
+
+// ForwardOFREPNamespace forwards the namespace header to the OFREP gRPC service.
+func ForwardOFREPNamespace(_ context.Context, r *http.Request) metadata.MD {
+	if namespace := r.Header.Get("X-Flipt-Namespace"); namespace != "" {
+		return metadata.Pairs("x-flipt-namespace", namespace)
+	}
+	return nil
+}
