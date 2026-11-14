@@ -2,6 +2,7 @@ package grpc_middleware
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -23,11 +25,74 @@ import (
 	authrpc "go.flipt.io/flipt/rpc/flipt/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
 type validatable struct {
 	err error
+}
+
+func TestErrorUnaryInterceptor_Cancellation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want codes.Code
+	}{
+		{name: "context canceled", ctx: canceledContext(), err: context.Canceled, want: codes.Canceled},
+		{name: "wrapped deadline", ctx: expiredContext(), err: fmt.Errorf("handler: %w", context.DeadlineExceeded), want: codes.DeadlineExceeded},
+		{name: "sql canceled context", ctx: canceledContext(), err: &pq.Error{Code: pq.ErrorCode("57014")}, want: codes.Canceled},
+		{name: "wrapped sql deadline", ctx: expiredContext(), err: fmt.Errorf("query: %w", &pq.Error{Code: pq.ErrorCode("57014")}), want: codes.DeadlineExceeded},
+		{name: "live sql cancellation", ctx: context.Background(), err: errors.ErrCanceled("query canceled"), want: codes.Internal},
+		{name: "unrelated error canceled context", ctx: canceledContext(), err: errors.New("database unavailable"), want: codes.Internal},
+		{name: "existing status", ctx: canceledContext(), err: status.Error(codes.PermissionDenied, "denied"), want: codes.PermissionDenied},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ErrorUnaryInterceptor(test.ctx, nil, nil, func(context.Context, interface{}) (interface{}, error) {
+				return nil, test.err
+			})
+			require.Equal(t, test.want, status.Code(err))
+		})
+	}
+}
+
+type cancellationAuthenticator struct {
+	err error
+}
+
+func (a cancellationAuthenticator) GetAuthenticationByClientToken(context.Context, string) (*authrpc.Authentication, error) {
+	return nil, a.err
+}
+
+func TestAuthenticationAndErrorInterceptors_Cancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer token"))
+
+	authenticated := auth.UnaryInterceptor(
+		zaptest.NewLogger(t),
+		cancellationAuthenticator{err: fmt.Errorf("lookup: %w", errors.ErrCanceled("query canceled"))},
+	)
+	_, err := ErrorUnaryInterceptor(ctx, nil, nil, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return authenticated(ctx, req, &grpc.UnaryServerInfo{}, func(context.Context, interface{}) (interface{}, error) {
+			return nil, nil
+		})
+	})
+
+	require.Equal(t, codes.Canceled, status.Code(err))
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func expiredContext() context.Context {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	return ctx
 }
 
 func (v *validatable) Validate() error {

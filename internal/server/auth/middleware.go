@@ -2,11 +2,13 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"go.flipt.io/flipt/internal/containers"
+	storageSQL "go.flipt.io/flipt/internal/storage/sql"
 	authrpc "go.flipt.io/flipt/rpc/flipt/auth"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -110,6 +112,20 @@ func UnaryInterceptor(logger *zap.Logger, authenticator Authenticator, o ...cont
 			logger.Error("unauthenticated",
 				zap.String("reason", "error retrieving authentication for client token"),
 				zap.Error(err))
+			switch {
+			case errors.Is(err, context.Canceled) && ctx.Err() == context.Canceled:
+				return ctx, status.Error(codes.Canceled, err.Error())
+			case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == context.DeadlineExceeded:
+				return ctx, status.Error(codes.DeadlineExceeded, err.Error())
+			case storageSQL.IsCancellationError(err):
+				switch ctx.Err() {
+				case context.Canceled:
+					return ctx, status.Error(codes.Canceled, err.Error())
+				case context.DeadlineExceeded:
+					return ctx, status.Error(codes.DeadlineExceeded, err.Error())
+				}
+			}
+
 			return ctx, errUnauthenticated
 		}
 
